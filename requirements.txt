@@ -1,0 +1,42 @@
+# ---- Core ----
+ultralytics>=8.2.0
+opencv-python>=4.9.0
+Pillow>=10.0.0
+numpy>=1.24.0
+
+# ---- PDF Processing ----
+pdf2image>=1.17.0
+PyMuPDF>=1.24.0
+
+# ---- OCR ----
+easyocr>=1.7.0
+
+# ---- Graph ----
+networkx>=3.2.0
+
+# ---- LLM & Agents ----
+langchain-groq>=0.1.0
+langgraph>=0.2.0
+langchain-core>=0.2.0
+
+# ---- Web App ----
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+streamlit>=1.35.0
+python-multipart>=0.0.9
+
+# ---- MTO Output ----
+openpyxl>=3.1.0
+pandas>=2.1.0
+
+# ---- Config ----
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+python-dotenv>=1.0.0
+
+# ---- Testing ----
+pytest>=8.0.0
+
+# ---- Visualization ----
+pyvis>=0.3.2
+matplotlib>=3.8.0
