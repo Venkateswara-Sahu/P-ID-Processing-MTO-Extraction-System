@@ -65,11 +65,13 @@ class EngineeringEntity:
 class EntityMapper:
     """Maps detected symbols to OCR text using spatial proximity."""
 
-    def __init__(self, max_distance: float = 150.0):
+    def __init__(self, max_distance: float = 350.0):
         """
         Args:
             max_distance: Maximum pixel distance between a symbol center
                          and a text region center for association.
+                         NOTE: This is in the coordinate space of the processed
+                         (upscaled) image. At 3x upscale a 100px gap becomes 300px.
         """
         self.max_distance = max_distance
         self.tag_parser = TagParser()
@@ -235,7 +237,7 @@ class EntityMapper:
         text_regions: List[TextRegion],
         parsed_tags: List[ParsedTag],
         assigned: set,
-        max_results: int = 3,
+        max_results: int = 5,
     ) -> List[Tuple[TextRegion, ParsedTag, float]]:
         """
         Find the nearest unassigned text regions to a symbol.

@@ -159,9 +159,9 @@ def main():
         st.markdown("---")
         st.markdown("### 📊 Pipeline Architecture")
         st.markdown("""
-        1. 📄 **Preprocess** — Enhance & tile
+        1. 📄 **Preprocess** — Enhance & upscale
         2. 🎯 **Detect** — YOLOv8 symbols
-        3. 📝 **Extract** — PaddleOCR text
+        3. 📝 **Extract** — Tesseract OCR (CC-guided)
         4. 🔗 **Map** — Entity graph (NetworkX)
         5. 🤖 **Validate** — LLM + rules
         6. 📊 **Generate** — MTO Excel
@@ -169,7 +169,7 @@ def main():
 
         st.markdown("---")
         st.markdown(
-            "Built with YOLOv8, PaddleOCR, LangGraph, Groq, NetworkX",
+            "Built with YOLOv8, Tesseract OCR, LangGraph, Groq, NetworkX",
             help="Free & open-source stack",
         )
 
@@ -211,7 +211,7 @@ def main():
             st.image(preview, caption=f"📄 {uploaded_file.name} ({image.shape[1]}×{image.shape[0]}px)", width="stretch")
 
         # Process button
-        if st.button("🚀 Extract MTO", type="primary", use_container_width=True):
+        if st.button("🚀 Extract MTO", type="primary", width="stretch"):
             _run_pipeline(input_source, project_name, run_llm, confidence_threshold)
 
         # Display results from session state (persists across reruns)
@@ -460,9 +460,10 @@ def _display_graph_view(result):
         with open(graph_html, "r", encoding="utf-8") as f:
             html_content = f.read()
 
-        # Wrap in a fixed-height scrollable container
-        wrapped_html = f'<div style="height:520px;overflow:auto;">{html_content}</div>'
-        st.html(wrapped_html)
+        # Render the PyVis graph in an iframe via components.v1.html
+        # (st.html wraps in a div which breaks full HTML documents)
+        import streamlit.components.v1 as components
+        components.html(html_content, height=520, scrolling=True)
 
     except ImportError:
         st.warning("Install pyvis for interactive graph visualization: `pip install pyvis`")
@@ -535,7 +536,7 @@ def _display_download(result):
                     file_name=Path(result.mto_path).name,
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     type="primary",
-                    use_container_width=True,
+                    width="stretch",
 
                 )
         else:
@@ -550,8 +551,7 @@ def _display_download(result):
                 data=buffer.tobytes(),
                 file_name="annotated_pid.png",
                 mime="image/png",
-                use_container_width=True,
-
+                width="stretch",
             )
 
     # JSON export
@@ -562,8 +562,7 @@ def _display_download(result):
         data=summary_json,
         file_name="extraction_summary.json",
         mime="application/json",
-        use_container_width=True,
-
+        width="stretch",
     )
 
 

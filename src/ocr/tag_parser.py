@@ -120,7 +120,29 @@ class TagParser:
         "VT": "Vent",
     }
 
-    def parse(self, text: str) -> ParsedTag:
+    # Common OCR character confusions in engineering tag context
+    _OCR_CORRECTIONS = [
+        # Extra vowel appended to single-letter prefix: 'Re' → 'R', 'Ee' → 'E' etc.
+        (re.compile(r'^([RTEPCVDBFKHMSX])e(\d)', re.IGNORECASE), r'\1\2'),
+        (re.compile(r'^([RTEPCVDBFKHMSX])o(\d)', re.IGNORECASE), r'\1\2'),
+        # 'O' confused with '0', 'I'/'l' confused with '1'
+        (re.compile(r'(?<=\d)O(?=\d|$)'), '0'),
+        (re.compile(r'(?<=\d)I(?=\d|$)'), '1'),
+        (re.compile(r'(?<=\d)l(?=\d|$)'), '1'),
+        # Leading '+' or stray chars before known tag prefixes
+        (re.compile(r'^[+\-./]+([A-Z])'), r'\1'),
+        # Clean up spaces around dashes in tags
+        (re.compile(r'([A-Z])\s+(\d)'), r'\1-\2'),
+    ]
+
+    def _normalize_ocr(self, text: str) -> str:
+        """Apply known OCR correction rules for engineering tag text."""
+        t = text.strip()
+        for pattern, repl in self._OCR_CORRECTIONS:
+            t = pattern.sub(repl, t)
+        return t
+
+    def parse(self, text: str) -> 'ParsedTag':
         """
         Parse a single text string into a structured engineering tag.
 
@@ -130,12 +152,13 @@ class TagParser:
         Returns:
             ParsedTag with classification and structured fields.
         """
-        text = text.strip()
+        text = self._normalize_ocr(text.strip())
 
         # Try each pattern in order of specificity
         result = self._try_instrument_tag(text)
         if result:
             return result
+
 
         result = self._try_line_number(text)
         if result:

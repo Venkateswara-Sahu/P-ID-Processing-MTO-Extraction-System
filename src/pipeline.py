@@ -158,6 +158,23 @@ class PIDPipeline:
                 raise ValueError(f"Failed to load image: {input_path}")
 
         result.image_size = (image.shape[1], image.shape[0])
+
+        # Upscale small images before detection/OCR.
+        # YOLO tiles at 640px — an image narrower than 1280px means symbols
+        # are smaller than the model was trained on → poor detection.
+        # EasyOCR CRAFT needs ≥ 20px character height.
+        min_width = 1920
+        h_orig, w_orig = image.shape[:2]
+        if w_orig < min_width:
+            scale_up = min_width / w_orig
+            new_w = int(w_orig * scale_up)
+            new_h = int(h_orig * scale_up)
+            image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+            logger.info(
+                f"  Image upscaled {w_orig}×{h_orig} → {new_w}×{new_h} "
+                f"(×{scale_up:.1f}) for better detection & OCR"
+            )
+
         enhanced = self._preprocessor.enhance(image, apply_clahe=True, apply_denoise=True)
 
         # ---- Step 2: Symbol Detection ----
@@ -173,11 +190,19 @@ class PIDPipeline:
         logger.info(f"  Found {len(detections)} symbols")
 
         # ---- Step 3: OCR Text Extraction ----
-        logger.info("Step 3/6: Extracting text (PaddleOCR)...")
+        logger.info("Step 3/6: Extracting text (detection-guided Tesseract OCR)...")
 
-        text_regions = self._ocr.extract(enhanced)
+        # Detection-guided: for each YOLO bbox, crop a label search region
+        # below/beside the symbol and run Tesseract on just that clean patch.
+        # This avoids the pipe-line confusion that kills full-image OCR.
+        # Also runs a full-image Tesseract pass (psm 11) for standalone labels.
+        text_regions = self._ocr.extract_with_detections(image, detections)
         result.text_regions = text_regions
-        logger.info(f"  Found {len(text_regions)} text regions")
+        if text_regions:
+            detected_texts = [f'"{tr.text}" ({tr.confidence:.2f})' for tr in text_regions]
+            logger.info(f"  Found {len(text_regions)} text regions: {', '.join(detected_texts[:25])}")
+        else:
+            logger.warning("  No text detected!")
 
         # ---- Step 4: Entity Mapping & Graph ----
         logger.info("Step 4/6: Building entity graph...")
@@ -263,6 +288,16 @@ class PIDPipeline:
         result = PipelineResult()
         result.image_size = (image.shape[1], image.shape[0])
 
+        # Upscale small images (same logic as process())
+        min_width = 1920
+        h_orig, w_orig = image.shape[:2]
+        if w_orig < min_width:
+            scale_up = min_width / w_orig
+            new_w = int(w_orig * scale_up)
+            new_h = int(h_orig * scale_up)
+            image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+            logger.info(f"  Image upscaled {w_orig}×{h_orig} → {new_w}×{new_h}")
+
         # Preprocess
         enhanced = self._preprocessor.enhance(image)
 
@@ -275,9 +310,14 @@ class PIDPipeline:
         )
         result.detections = detections
 
-        # OCR
-        text_regions = self._ocr.extract(enhanced)
+        # OCR — detection-guided: crop label regions around each symbol
+        text_regions = self._ocr.extract_with_detections(image, detections)
         result.text_regions = text_regions
+        if text_regions:
+            detected_texts = [f'"{tr.text}"' for tr in text_regions[:10]]
+            logger.info(f"  OCR found {len(text_regions)} regions: {', '.join(detected_texts)}")
+        else:
+            logger.warning("  OCR: no text detected.")
 
         # Graph
         entities = self._entity_mapper.map_entities(detections, text_regions)
