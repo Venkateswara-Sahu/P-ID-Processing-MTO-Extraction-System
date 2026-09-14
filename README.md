@@ -1,6 +1,6 @@
 # 🏗️ P&ID Document Intelligence & MTO Extraction Pipeline
 
-**An end-to-end AI system that automatically extracts Material Take-Off (MTO) data from P&ID (Piping & Instrumentation Diagram) engineering drawings using Computer Vision, OCR, Graph-based reasoning, and LLM validation.**
+**A July 2026 document-intelligence prototype that converts P&ID (Piping & Instrumentation Diagram) drawings into reviewable Material Take-Off (MTO) records using computer vision, OCR, graph mapping, and optional LLM validation.**
 
 ![Python](https://img.shields.io/badge/Python-3.12+-3776AB?logo=python&logoColor=white)
 ![YOLOv8](https://img.shields.io/badge/YOLOv8-Ultralytics-00FFFF)
@@ -16,7 +16,7 @@
 
 In EPC (Engineering, Procurement, Construction) projects, extracting Material Take-Off data from P&ID drawings is a **manual, time-consuming, and error-prone process**. Engineers spend hours identifying valves, instruments, equipment, and piping components from complex drawings and tabulating them into MTO spreadsheets.
 
-This project **automates the entire process** using AI/ML:
+This project demonstrates the following assisted extraction workflow:
 
 ```
 📄 P&ID Drawing → 🎯 Symbol Detection → 📝 OCR Text Extraction → 🔗 Graph Mapping → 🤖 AI Validation → 📊 MTO Excel
@@ -31,7 +31,7 @@ flowchart TB
     A["📄 P&ID Upload<br/>(PDF/Image)"] --> B["🔧 Preprocessing<br/>PDF→Image, CLAHE, Upscaling"]
     B --> C["🎯 YOLOv8<br/>Symbol Detection"]
     B --> D["📝 Tesseract OCR<br/>CC-Guided Text Extraction"]
-    C --> E["🏷️ Tag Parser<br/>ISA Standard Parsing"]
+    C --> E["🏷️ Tag Parser<br/>Rule-based Parsing"]
     D --> E
     E --> F["🔗 Entity Mapper<br/>Spatial Proximity Matching"]
     F --> G["📊 NetworkX Graph<br/>Relationship Resolution"]
@@ -50,7 +50,7 @@ flowchart TB
 |---------|-----------|-------------|
 | **Symbol Detection** | YOLOv8s (custom-trained) | Detects valves, instruments, equipment, piping components |
 | **Text Extraction** | Tesseract OCR + Connected-Component Analysis | CC-guided OCR finds text-like blobs first, then OCR reads only those regions — avoids pipe-line noise |
-| **Tag Parsing** | Regex + ISA-5.1 Standards | Parses `FV-101`, `PI-202`, `6"-PA-1001` into structured data with OCR correction heuristics |
+| **Tag Parsing** | Regex + engineering tag conventions | Parses examples such as `FV-101`, `PI-202`, and `6"-PA-1001` into structured data with OCR correction heuristics |
 | **Entity Mapping** | Spatial Proximity | Associates detected symbols with their nearest text labels |
 | **Graph Reasoning** | NetworkX | Builds relationship graph, resolves piping connections and instrument loops |
 | **Rule Validation** | Deterministic Rules | Checks tag uniqueness, loop integrity, valve connections |
@@ -181,7 +181,7 @@ A key innovation of this pipeline is how it handles OCR on complex P&ID drawings
 6. **Filter Tesseract's results** to only words overlapping the CC mask
 7. **Post-process**: merge fragments, apply OCR correction heuristics (`Re1001` → `R-1001`)
 
-This runs in **~7 seconds** vs. ~360 seconds for per-crop approaches.
+In the recorded project test, this change reduced OCR processing from approximately **360 seconds to 7 seconds**. This is an implementation benchmark rather than a general performance guarantee; timing varies with image size and hardware.
 
 ---
 
@@ -247,6 +247,8 @@ Items grouped by category (Equipment, Valves, Instruments, Piping, Other):
 - **YOLO model accuracy** depends on the P&ID symbol style it was trained on. The included training notebook uses a publicly available Roboflow dataset. Re-train on your own drawings for best results.
 - **OCR accuracy** on very small or overlapping labels may be limited without a higher-resolution scan.
 - **LLM validation** requires a free Groq API key (`GROQ_API_KEY` in `.env`). Without it, only rule-based validation runs.
+- **Prototype scope**: extracted records require human review; the project has not been validated on a representative industrial drawing corpus.
+- **Tag conventions**: rule-based parsing is inspired by common engineering tag formats and is not a certification of complete ISA-5.1 compliance.
 
 ---
 
