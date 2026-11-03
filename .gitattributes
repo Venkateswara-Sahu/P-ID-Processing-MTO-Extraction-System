@@ -1,0 +1,15 @@
+# Normalise line endings in the repository; check out LF on every platform.
+# Without this, core.autocrlf=true gives Windows a CRLF tree while the
+# notebook embeds LF sources, and the tools/notebook equality test breaks.
+* text=auto eol=lf
+
+# Binary assets: never convert or diff as text.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.pdf binary
+*.pt binary
+*.onnx binary
+*.weights binary
+*.xlsx binary
+*.zip binary

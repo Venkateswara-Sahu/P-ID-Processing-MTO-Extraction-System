@@ -82,7 +82,11 @@ def test_the_tools_are_embedded_and_match_the_repository(notebook):
         repo_file = ROOT / "tools" / name
         assert repo_file.exists(), f"{name} is embedded but not in tools/"
         decoded = base64.b64decode(blob)
-        assert decoded == repo_file.read_bytes(), (
+        # Compare content, not checkout line endings: a CRLF working tree
+        # must not fail this test.
+        assert decoded.replace(b"\r\n", b"\n") == repo_file.read_bytes().replace(
+            b"\r\n", b"\n"
+        ), (
             f"the embedded {name} differs from tools/{name} - "
             "re-run python tools/build_notebook.py"
         )
