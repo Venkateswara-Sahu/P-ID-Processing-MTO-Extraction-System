@@ -7,7 +7,9 @@ based on detection quality, OCR accuracy, and tag parsing success.
 
 import logging
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Optional
+
+import networkx as nx
 
 from src.graph.entity_mapper import EngineeringEntity
 
@@ -63,12 +65,18 @@ class ConfidenceScorer:
     def score_entities(
         self,
         entities: List[EngineeringEntity],
+        graph: Optional[nx.DiGraph] = None,
     ) -> List[ConfidenceBreakdown]:
         """
         Calculate confidence scores for all entities.
 
         Args:
-            entities: List of engineering entities.
+            entities: List of EngineeringEntity objects.
+            graph: Optional graph whose node confidences should be kept in
+                step with the entities. Scoring rewrites
+                ``entity.confidence``, so a graph built BEFORE scoring
+                would otherwise keep a pre-scoring value and disagree with
+                the MTO about the same entity.
 
         Returns:
             List of ConfidenceBreakdown objects.
@@ -81,6 +89,12 @@ class ConfidenceScorer:
 
             # Update entity confidence
             entity.confidence = breakdown.overall_score
+
+        # Keep any graph node confidence in step with its entity.
+        if graph is not None:
+            for entity in entities:
+                if entity.entity_id in graph:
+                    graph.nodes[entity.entity_id]["confidence"] = entity.confidence
 
         # Log summary
         avg_confidence = (

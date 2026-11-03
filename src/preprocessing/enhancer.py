@@ -32,14 +32,14 @@ class ImageEnhancer:
             clip_limit: CLAHE clip limit for contrast enhancement.
             grid_size: CLAHE grid size.
         """
-        self.clip_limit = clip_limit or settings.clahe_clip_limit
-        self.grid_size = grid_size or settings.clahe_grid_size
+        self.clip_limit = clip_limit if clip_limit is not None else settings.clahe_clip_limit
+        self.grid_size = grid_size if grid_size is not None else settings.clahe_grid_size
 
     def enhance(
         self,
         image: np.ndarray,
         apply_clahe: bool = True,
-        apply_denoise: bool = True,
+        apply_denoise: Optional[bool] = None,
         apply_sharpen: bool = False,
         apply_binarize: bool = False,
     ) -> np.ndarray:
@@ -49,13 +49,19 @@ class ImageEnhancer:
         Args:
             image: Input BGR image.
             apply_clahe: Apply contrast-limited adaptive histogram equalization.
-            apply_denoise: Apply non-local means denoising.
+            apply_denoise: Apply non-local means denoising. Defaults to the
+                ``enable_denoise`` setting, which is OFF by default: denoising
+                a full-resolution sheet costs ~20 minutes at A1/300 DPI, and
+                1px line art survives CLAHE alone.
             apply_sharpen: Apply unsharp mask sharpening.
             apply_binarize: Apply adaptive binarization (for OCR).
 
         Returns:
             Enhanced image as numpy array.
         """
+        if apply_denoise is None:
+            apply_denoise = settings.enable_denoise
+
         result = image.copy()
 
         if apply_clahe:

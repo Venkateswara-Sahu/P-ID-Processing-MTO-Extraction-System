@@ -30,7 +30,7 @@ class PDFConverter:
             dpi: Resolution for rendering. Higher DPI = better quality but larger images.
                  Default uses config setting (300 DPI).
         """
-        self.dpi = dpi or settings.pdf_dpi
+        self.dpi = dpi if dpi is not None else settings.pdf_dpi
         # PyMuPDF uses a zoom matrix based on DPI (72 DPI is the base)
         self.zoom = self.dpi / 72.0
 

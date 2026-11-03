@@ -4,7 +4,7 @@ P&ID MTO Extraction Pipeline — Main Orchestrator.
 Coordinates the full extraction pipeline:
 1. Preprocessing (PDF → enhanced images → tiles)
 2. Detection (YOLOv8 symbol detection on tiles)
-3. OCR (PaddleOCR text extraction)
+3. OCR (CC-guided Tesseract text extraction)
 4. Graph (Entity mapping + relationship resolution)
 5. Validation (Rule-based + LLM validation)
 6. MTO Generation (Excel output)
@@ -50,6 +50,8 @@ class PipelineResult:
     # Metadata
     processing_time: float = 0.0
     image_size: tuple = (0, 0)
+    scale_factor: float = 1.0
+    per_page: list = field(default_factory=list)
 
     def to_summary(self) -> dict:
         return {
@@ -61,6 +63,8 @@ class PipelineResult:
             "mto_path": self.mto_path,
             "processing_time_seconds": round(self.processing_time, 2),
             "image_size": self.image_size,
+            "scale_factor": round(self.scale_factor, 3),
+            "pages": self.per_page,
         }
 
 
@@ -84,7 +88,13 @@ class PIDPipeline:
         self._mto_generator = None
 
     def _init_components(self):
-        """Initialize all pipeline components."""
+        """
+        Initialize all pipeline components.
+
+        Idempotent: components that are already present are kept, so the
+        22MB YOLOv8 model is loaded once per PIDPipeline rather than on
+        every process() call.
+        """
         from src.preprocessing.enhancer import ImageEnhancer
         from src.preprocessing.image_tiler import ImageTiler
         from src.detection.symbol_detector import SymbolDetector
@@ -99,19 +109,32 @@ class PIDPipeline:
         from src.validation.llm_validator import LLMValidator
         from src.mto.mto_generator import MTOGenerator
 
-        self._preprocessor = ImageEnhancer()
-        self._tiler = ImageTiler()
-        self._detector = SymbolDetector()
-        self._postprocessor = DetectionPostProcessor()
-        self._ocr = TextExtractor()
-        self._tag_parser = TagParser()
-        self._entity_mapper = EntityMapper()
-        self._graph_builder = PIDGraphBuilder()
-        self._relationship_resolver = RelationshipResolver()
-        self._rule_validator = EngineeringRuleValidator()
-        self._confidence_scorer = ConfidenceScorer()
-        self._llm_validator = LLMValidator()
-        self._mto_generator = MTOGenerator()
+        if self._preprocessor is None:
+            self._preprocessor = ImageEnhancer()
+        if self._tiler is None:
+            self._tiler = ImageTiler()
+        if self._detector is None:
+            self._detector = SymbolDetector()
+        if self._postprocessor is None:
+            self._postprocessor = DetectionPostProcessor()
+        if self._ocr is None:
+            self._ocr = TextExtractor()
+        if self._tag_parser is None:
+            self._tag_parser = TagParser()
+        if self._entity_mapper is None:
+            self._entity_mapper = EntityMapper()
+        if self._graph_builder is None:
+            self._graph_builder = PIDGraphBuilder()
+        if self._relationship_resolver is None:
+            self._relationship_resolver = RelationshipResolver()
+        if self._rule_validator is None:
+            self._rule_validator = EngineeringRuleValidator()
+        if self._confidence_scorer is None:
+            self._confidence_scorer = ConfidenceScorer()
+        if self._llm_validator is None:
+            self._llm_validator = LLMValidator()
+        if self._mto_generator is None:
+            self._mto_generator = MTOGenerator()
 
         logger.info("Pipeline components initialized")
 
@@ -121,6 +144,7 @@ class PIDPipeline:
         project_name: str = "P&ID Extraction",
         run_llm_validation: bool = True,
         generate_mto: bool = True,
+        max_pages: Optional[int] = None,
     ) -> PipelineResult:
         """
         Run the full extraction pipeline on a P&ID image or PDF.
@@ -130,6 +154,9 @@ class PIDPipeline:
             project_name: Project name for MTO header.
             run_llm_validation: Whether to run LLM validation (requires API key).
             generate_mto: Whether to generate MTO Excel.
+            max_pages: Maximum number of PDF pages to process. None means
+                every page. P&ID packages are routinely multi-sheet and
+                processing only the first page silently discarded the rest.
 
         Returns:
             PipelineResult with all extraction data.
@@ -147,71 +174,86 @@ class PIDPipeline:
         # ---- Step 1: Load & Preprocess ----
         logger.info("Step 1/6: Loading and preprocessing...")
 
+        pages: List[np.ndarray] = []
         if input_path.suffix.lower() == ".pdf":
             from src.preprocessing.pdf_converter import PDFConverter
             converter = PDFConverter()
-            images = converter.convert_to_numpy(str(input_path))
-            image = images[0]  # Process first page
+            pages = converter.convert_to_numpy(str(input_path))
+            if max_pages is not None:
+                pages = pages[:max_pages]
+            if not pages:
+                raise ValueError(f"No renderable pages in PDF: {input_path}")
+            logger.info(f"  PDF has {len(pages)} page(s) to process")
+            image = pages[0]
         else:
             image = cv2.imread(str(input_path))
             if image is None:
                 raise ValueError(f"Failed to load image: {input_path}")
+            pages = [image]
 
-        result.image_size = (image.shape[1], image.shape[0])
-
-        # Upscale small images before detection/OCR.
-        # YOLO tiles at 640px — an image narrower than 1280px means symbols
-        # are smaller than the model was trained on → poor detection.
-        # EasyOCR CRAFT needs ≥ 20px character height.
-        min_width = 1920
+        # The image is NOT upscaled for detection.
+        #
+        # The model was trained at imgsz=640 on images that were 640x640
+        # (1:1) and 1312x1312 (0.49x). Upscaling a sheet before tiling
+        # pushed the symbols far outside that distribution: measured on
+        # the dataset's own val split, the old "upscale then tile at
+        # 640" configuration scored F1 0.462, against 0.970 for
+        # whole-image detection. Tiling at the model's native 1312
+        # instead scored 0.958 on a 3936px sheet.
+        #
+        # OCR does not need the upscale: TextExtractor already inflates
+        # the image internally for binarisation, and divides the
+        # coordinates back out.
         h_orig, w_orig = image.shape[:2]
-        if w_orig < min_width:
-            scale_up = min_width / w_orig
-            new_w = int(w_orig * scale_up)
-            new_h = int(h_orig * scale_up)
-            image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
-            logger.info(
-                f"  Image upscaled {w_orig}×{h_orig} → {new_w}×{new_h} "
-                f"(×{scale_up:.1f}) for better detection & OCR"
-            )
+        scale_factor = 1.0
 
-        enhanced = self._preprocessor.enhance(image, apply_clahe=True, apply_denoise=True)
+        # The reported size must describe the frame the coordinates live in.
+        result.image_size = (w_orig, h_orig)
+        result.scale_factor = scale_factor
 
-        # ---- Step 2: Symbol Detection ----
-        logger.info("Step 2/6: Detecting symbols (YOLOv8)...")
+        # ---- Steps 2-5 for every page ----
+        all_detections: List = []
+        all_text_regions: List = []
+        all_entities: List = []
+        all_graphs: List = []
+        per_page: List[dict] = []
 
-        tiling_result = self._tiler.tile(enhanced)
-        tile_images = [t.image for t in tiling_result.tiles]
-        tile_detections = self._detector.detect_batch(tile_images)
-        detections = self._postprocessor.merge_tiled_detections(
-            tile_detections, tiling_result
-        )
-        result.detections = detections
-        logger.info(f"  Found {len(detections)} symbols")
+        for page_index, page_image in enumerate(pages):
+            if len(pages) > 1:
+                logger.info(f"  --- Page {page_index + 1} of {len(pages)} ---")
 
-        # ---- Step 3: OCR Text Extraction ----
-        logger.info("Step 3/6: Extracting text (detection-guided Tesseract OCR)...")
+            page_result = self._process_page(page_image, page_index)
 
-        # Detection-guided: for each YOLO bbox, crop a label search region
-        # below/beside the symbol and run Tesseract on just that clean patch.
-        # This avoids the pipe-line confusion that kills full-image OCR.
-        # Also runs a full-image Tesseract pass (psm 11) for standalone labels.
-        text_regions = self._ocr.extract_with_detections(image, detections)
-        result.text_regions = text_regions
-        if text_regions:
-            detected_texts = [f'"{tr.text}" ({tr.confidence:.2f})' for tr in text_regions]
-            logger.info(f"  Found {len(text_regions)} text regions: {', '.join(detected_texts[:25])}")
-        else:
-            logger.warning("  No text detected!")
+            all_detections.extend(page_result["detections"])
+            all_text_regions.extend(page_result["text_regions"])
+            all_entities.extend(page_result["entities"])
+            if page_result["graph"] is not None:
+                all_graphs.append(page_result["graph"])
 
-        # ---- Step 4: Entity Mapping & Graph ----
-        logger.info("Step 4/6: Building entity graph...")
+            per_page.append({
+                "page": page_index + 1,
+                "detections": len(page_result["detections"]),
+                "text_regions": len(page_result["text_regions"]),
+                "entities": len(page_result["entities"]),
+            })
 
-        entities = self._entity_mapper.map_entities(detections, text_regions)
-        graph = self._graph_builder.build(entities)
-        graph = self._relationship_resolver.resolve(graph, entities)
+        result.detections = all_detections
+        result.text_regions = all_text_regions
+        result.entities = all_entities
+        result.per_page = per_page
 
-        result.entities = entities
+        # Each page's mapper restarts its counter, so entity ids collide
+        # across pages. Renumber them so every entity in the result has a
+        # unique id.
+        for index, entity in enumerate(all_entities, start=1):
+            entity.entity_id = f"E{index:04d}"
+
+        # ---- Build one graph over every page's entities ----
+        graph = self._graph_builder.build(all_entities)
+        graph = self._relationship_resolver.resolve(graph, all_entities)
+        breakdowns = self._confidence_scorer.score_entities(all_entities, graph=graph)
+        result.confidence_summary = self._confidence_scorer.get_summary_stats(breakdowns)
+
         result.graph = graph
         result.graph_summary = self._graph_builder.get_graph_summary()
         logger.info(f"  Graph: {result.graph_summary['total_nodes']} nodes, "
@@ -220,17 +262,12 @@ class PIDPipeline:
         # ---- Step 5: Validation ----
         logger.info("Step 5/6: Validating extraction...")
 
-        # Confidence scoring
-        breakdowns = self._confidence_scorer.score_entities(entities)
-        result.confidence_summary = self._confidence_scorer.get_summary_stats(breakdowns)
-
-        # Rule-based validation
-        rule_report = self._rule_validator.validate(entities, graph)
+        rule_report = self._rule_validator.validate(all_entities, graph)
         result.rule_report = rule_report.to_dict()
 
         # LLM validation (optional)
         if run_llm_validation:
-            entities_data = [e.to_dict() for e in entities]
+            entities_data = [e.to_dict() for e in all_entities]
             llm_result = self._llm_validator.validate(
                 entities_data,
                 result.graph_summary,
@@ -242,17 +279,18 @@ class PIDPipeline:
         if generate_mto:
             logger.info("Step 6/6: Generating MTO spreadsheet...")
             result.mto_path = self._mto_generator.generate(
-                entities=entities,
+                entities=all_entities,
                 graph=graph,
                 project_name=project_name,
                 sheet_ref=input_path.stem,
                 validation_report=result.llm_report if run_llm_validation else None,
+                rule_report=result.rule_report,
             )
             logger.info(f"  MTO saved: {result.mto_path}")
 
-        # ---- Generate annotated image ----
-        annotated = self._detector.draw_detections(image, detections)
-        annotated = self._ocr.draw_text_regions(annotated, text_regions)
+        # ---- Generate annotated image (first page) ----
+        annotated = self._detector.draw_detections(image, all_detections)
+        annotated = self._ocr.draw_text_regions(annotated, all_text_regions)
         result.annotated_image = annotated
 
         result.processing_time = time.time() - start_time
@@ -262,6 +300,53 @@ class PIDPipeline:
         logger.info(f"{'='*60}")
 
         return result
+
+    def _process_page(self, image: np.ndarray, page_index: int = 0) -> dict:
+        """
+        Run detection, OCR, entity mapping and graph building for one page.
+
+        Returns a dict with the page's detections, text regions, entities
+        and graph.
+        """
+        enhanced = self._preprocessor.enhance(image)
+
+        # ---- Symbol Detection ----
+        logger.info("Step 2/6: Detecting symbols (YOLOv8)...")
+
+        tiling_result = self._tiler.tile(enhanced)
+        tile_images = [t.image for t in tiling_result.tiles]
+        tile_detections = self._detector.detect_batch(tile_images)
+        detections = self._postprocessor.merge_tiled_detections(
+            tile_detections, tiling_result
+        )
+        logger.info(f"  Found {len(detections)} symbols")
+
+        # ---- OCR Text Extraction ----
+        logger.info("Step 3/6: Extracting text (CC-guided Tesseract OCR)...")
+
+        # The CC-guided extractor finds text-like blobs first, then reads
+        # only those regions, which avoids the pipe-line confusion that
+        # kills full-image OCR.
+        text_regions = self._ocr.extract_with_detections(image, detections)
+        if text_regions:
+            detected_texts = [f'"{tr.text}" ({tr.confidence:.2f})' for tr in text_regions]
+            logger.info(f"  Found {len(text_regions)} text regions: {', '.join(detected_texts[:25])}")
+        else:
+            logger.warning("  No text detected!")
+
+        # ---- Entity Mapping & Graph ----
+        logger.info("Step 4/6: Building entity graph...")
+
+        entities = self._entity_mapper.map_entities(detections, text_regions)
+        graph = self._graph_builder.build(entities)
+        graph = self._relationship_resolver.resolve(graph, entities)
+
+        return {
+            "detections": detections,
+            "text_regions": text_regions,
+            "entities": entities,
+            "graph": graph,
+        }
 
     def process_image_array(
         self,
@@ -286,17 +371,15 @@ class PIDPipeline:
         self._init_components()
 
         result = PipelineResult()
-        result.image_size = (image.shape[1], image.shape[0])
 
-        # Upscale small images (same logic as process())
-        min_width = 1920
+        # NOT upscaled: see the note in process(). The model was trained
+        # at a fixed scale and the OCR stage inflates the image itself.
         h_orig, w_orig = image.shape[:2]
-        if w_orig < min_width:
-            scale_up = min_width / w_orig
-            new_w = int(w_orig * scale_up)
-            new_h = int(h_orig * scale_up)
-            image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
-            logger.info(f"  Image upscaled {w_orig}×{h_orig} → {new_w}×{new_h}")
+        scale_factor = 1.0
+
+        # Report the size of the frame the coordinates actually live in.
+        result.image_size = (w_orig, h_orig)
+        result.scale_factor = scale_factor
 
         # Preprocess
         enhanced = self._preprocessor.enhance(image)
@@ -321,15 +404,18 @@ class PIDPipeline:
 
         # Graph
         entities = self._entity_mapper.map_entities(detections, text_regions)
+
         graph = self._graph_builder.build(entities)
         graph = self._relationship_resolver.resolve(graph, entities)
+
+        # Score with the graph in hand so node confidences match the entities.
+        breakdowns = self._confidence_scorer.score_entities(entities, graph=graph)
+        result.confidence_summary = self._confidence_scorer.get_summary_stats(breakdowns)
         result.entities = entities
         result.graph = graph
         result.graph_summary = self._graph_builder.get_graph_summary()
 
         # Validation
-        breakdowns = self._confidence_scorer.score_entities(entities)
-        result.confidence_summary = self._confidence_scorer.get_summary_stats(breakdowns)
         rule_report = self._rule_validator.validate(entities, graph)
         result.rule_report = rule_report.to_dict()
 
@@ -344,7 +430,9 @@ class PIDPipeline:
         if generate_mto:
             result.mto_path = self._mto_generator.generate(
                 entities, graph, project_name,
+                sheet_ref="P&ID",
                 validation_report=result.llm_report if run_llm_validation else None,
+                rule_report=result.rule_report,
             )
 
         # Annotated image

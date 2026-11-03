@@ -312,7 +312,13 @@ def _merge_fragments(regions: List['TextRegion']) -> List['TextRegion']:
     return merged
 
 def _tesseract_crop(crop_bgr: np.ndarray) -> Tuple[str, float]:
-    """Run Tesseract on a single clean crop. Returns (text, confidence)."""
+    """
+    Run Tesseract on a single clean crop. Returns (text, confidence).
+
+    Kept for reference: the pipeline uses a single full-image psm-11 pass
+    (see TextExtractor._tesseract_full_image), which is ~40x faster than
+    one process spawn per crop.
+    """
     import pytesseract
 
     results = []
@@ -374,13 +380,41 @@ class TextExtractor:
         language: str = None,
         confidence_threshold: float = None,
         use_gpu: bool = False,
+        max_dimension: int = None,
     ):
-        self.language = language or settings.ocr_language
-        self.confidence_threshold = confidence_threshold or settings.ocr_confidence_threshold
+        self.language = language if language is not None else settings.ocr_language
+        self.confidence_threshold = (
+            confidence_threshold
+            if confidence_threshold is not None
+            else settings.ocr_confidence_threshold
+        )
         self.use_gpu = use_gpu
         self._reader = None
         self._tesseract_ok = _set_tesseract_path()
         self._ocr_scale = 3.0
+        self.max_dimension = (
+            max_dimension if max_dimension is not None else settings.ocr_max_dimension
+        )
+
+    def _effective_scale(self, image: np.ndarray) -> float:
+        """
+        The internal upscale factor, capped so the working image stays
+        within max_dimension.
+
+        Without the cap, an A1 sheet at 300 DPI (7000px) would be
+        inflated to 21000px by the 3x binarisation upscale - a ~1.3 GB
+        grayscale buffer, and a Tesseract call that never returns.
+        """
+        h, w = image.shape[:2]
+        longest = max(h, w)
+        if longest <= 0:
+            return self._ocr_scale
+        allowed = self.max_dimension / longest
+        if allowed >= self._ocr_scale:
+            return self._ocr_scale
+        # Never go below 1.0: shrinking the image further would destroy
+        # the text the OCR stage exists to read.
+        return max(1.0, allowed)
 
     # ------------------------------------------------------------------ #
     # Public API                                                           #
@@ -397,7 +431,7 @@ class TextExtractor:
         return self._run(image)
 
     def _run(self, image: np.ndarray) -> List[TextRegion]:
-        scale = self._ocr_scale
+        scale = self._effective_scale(image)
 
         # Step 1: Binarize (upscale x3 + dual threshold)
         binary_ink, upscaled = _binarize(image, scale=scale)

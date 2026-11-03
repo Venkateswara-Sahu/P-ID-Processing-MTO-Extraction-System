@@ -6,12 +6,18 @@ Implements a 3-node agentic validation pipeline:
 2. Validator Node — LLM checks engineering consistency
 3. Reporter Node — Generates human-readable validation report
 
-Uses Groq's Llama 3.3 70B for fast, free inference.
+Uses Groq's ``openai/gpt-oss-120b`` for fast, free inference. The model
+name used to be ``llama-3.3-70b-versatile``, which Groq retired -- it
+returns HTTP 404, so LLM validation silently never ran.
+
+Every failure mode (no API key, retired model, missing langgraph, network
+error) degrades to a clearly-flagged rule-only report rather than raising.
 """
 
 import logging
 import os
-from typing import Annotated, Dict, List, TypedDict
+import re
+from typing import Annotated, Dict, List, Optional, TypedDict
 
 from config.settings import settings
 
@@ -43,22 +49,31 @@ class LLMValidator:
     LangGraph-based LLM validator for P&ID extraction results.
 
     Uses a 3-node graph:
-    [Summarize] → [Validate] → [Report]
+    [Summarize] -> [Validate] -> [Report]
     """
 
     def __init__(self, api_key: str = None, model: str = None):
         """
         Args:
-            api_key: Groq API key. Falls back to settings/env.
+            api_key: Groq API key. Falls back to settings/env. An explicit
+                empty string means "no key" and is NOT replaced by the
+                configured one.
             model: Groq model name.
         """
-        self.api_key = api_key or settings.groq_api_key or os.getenv("GROQ_API_KEY", "")
+        if api_key is not None:
+            self.api_key = api_key
+        else:
+            self.api_key = settings.groq_api_key or os.getenv("GROQ_API_KEY", "")
         self.model = model or settings.groq_model
         self.graph = None
         self._llm = None
 
+    # ------------------------------------------------------------------ #
+    # Setup                                                                 #
+    # ------------------------------------------------------------------ #
+
     def _init_llm(self):
-        """Initialize the Groq LLM."""
+        """Initialize the Groq LLM. Returns False if it cannot be used."""
         if not self.api_key:
             logger.warning(
                 "No Groq API key configured. LLM validation will be skipped. "
@@ -74,6 +89,8 @@ class LLMValidator:
                 api_key=self.api_key,
                 temperature=settings.groq_temperature,
                 max_tokens=2048,
+                timeout=settings.groq_timeout,
+                max_retries=settings.groq_max_retries,
             )
             logger.info(f"Groq LLM initialized: {self.model}")
             return True
@@ -82,7 +99,12 @@ class LLMValidator:
             return False
 
     def _build_graph(self):
-        """Build the LangGraph validation pipeline."""
+        """
+        Build the LangGraph validation pipeline.
+
+        Raises:
+            ImportError: if langgraph is unavailable. The caller handles it.
+        """
         from langgraph.graph import StateGraph, START, END
 
         builder = StateGraph(ValidationState)
@@ -101,6 +123,10 @@ class LLMValidator:
         self.graph = builder.compile()
         logger.info("LangGraph validation pipeline built")
 
+    # ------------------------------------------------------------------ #
+    # Entry point                                                           #
+    # ------------------------------------------------------------------ #
+
     def validate(
         self,
         entities_data: List[dict],
@@ -116,13 +142,14 @@ class LLMValidator:
             rule_based_issues: Issues from deterministic rule checks.
 
         Returns:
-            Validation result dict with analysis, issues, and report.
+            Validation result dict with analysis, issues, and report. The
+            ``degraded`` flag is True when the LLM stage did not run.
         """
         if not self._init_llm():
-            return self._fallback_report(rule_based_issues)
-
-        if self.graph is None:
-            self._build_graph()
+            return self._fallback_report(
+                rule_based_issues,
+                reason="No Groq API key is configured.",
+            )
 
         # Prepare extraction summary for the LLM
         extraction_summary = self._format_extraction_summary(
@@ -142,17 +169,26 @@ class LLMValidator:
         )
 
         try:
-            # Run the graph
+            # Building the graph is INSIDE the try: a broken or missing
+            # langgraph must degrade to a rule-only report, not kill the
+            # whole pipeline.
+            if self.graph is None:
+                self._build_graph()
+
             result = self.graph.invoke(initial_state)
             return {
                 "llm_analysis": result["llm_analysis"],
                 "llm_issues": result["llm_issues"],
                 "report": result["final_report"],
                 "passed": result["validation_passed"],
+                "degraded": False,
             }
         except Exception as e:
             logger.error(f"LLM validation failed: {e}")
-            return self._fallback_report(rule_based_issues)
+            return self._fallback_report(
+                rule_based_issues,
+                reason=f"The LLM validation stage failed: {e}",
+            )
 
     # ---- Graph Nodes ----
 
@@ -160,7 +196,7 @@ class LLMValidator:
         """Node 1: Summarize the extraction data for LLM analysis."""
         prompt = f"""You are an engineering P&ID (Piping & Instrumentation Diagram) validation expert.
 
-Below is a summary of data extracted from a P&ID drawing using AI (YOLOv8 for symbol detection + PaddleOCR for text).
+Below is a summary of data extracted from a P&ID drawing using AI (YOLOv8 for symbol detection + Tesseract for text).
 Analyze this extraction and identify any potential issues or inconsistencies.
 
 ## Extracted Data Summary
@@ -196,33 +232,21 @@ For each issue found, provide:
 - Affected entity or component
 - Recommended action
 
-Format your response as a numbered list of issues. If no additional issues are found beyond rule-based checks, state "No additional issues found."
+Format your response as a numbered list of issues, one per line, in the form:
+<number>. <description> | Severity: <error|warning|info> | Entity: <entity id or name> | Action: <recommended action>
+
+If no additional issues are found beyond rule-based checks, write exactly:
+No additional issues found.
 
 Focus only on engineering-relevant issues, NOT on AI/ML model accuracy.
 """
         response = self._llm.invoke(prompt)
 
-        # Parse LLM issues (simple extraction)
-        llm_issues = []
-        lines = response.content.strip().split("\n")
-        current_issue = ""
-        for line in lines:
-            line = line.strip()
-            if line and (line[0].isdigit() or line.startswith("-")):
-                if current_issue:
-                    llm_issues.append(current_issue.strip())
-                current_issue = line
-            elif current_issue:
-                current_issue += " " + line
-
-        if current_issue:
-            llm_issues.append(current_issue.strip())
-
-        passed = not any("error" in issue.lower() for issue in llm_issues)
+        llm_issues = self._parse_issues(response.content)
 
         return {
             "llm_issues": llm_issues,
-            "validation_passed": passed,
+            "validation_passed": self._compute_passed(llm_issues),
         }
 
     def _report_node(self, state: ValidationState) -> dict:
@@ -253,7 +277,72 @@ Keep the report under 300 words. Use markdown formatting.
         response = self._llm.invoke(prompt)
         return {"final_report": response.content}
 
-    # ---- Helpers ----
+    # ------------------------------------------------------------------ #
+    # Response parsing                                                      #
+    # ------------------------------------------------------------------ #
+
+    # A line that starts a new issue: an optional markdown marker, a number
+    # and a period. '**1. Something**' must start an issue, and a sub-bullet
+    # '- Severity: error' must NOT.
+    _ISSUE_START = re.compile(r"^\s*(?:[*_#>\s]*)?(\d+)[.)]\s+(.*)$")
+    _SEVERITY = re.compile(r"severity\s*[:=]\s*\**\s*(error|warning|info)\b", re.IGNORECASE)
+
+    def _parse_issues(self, raw: str) -> List[str]:
+        """
+        Split a numbered issue list into individual issues.
+
+        Handles markdown-bold headers ('**1. Missing tag**') and keeps
+        sub-bullets ('- Severity: error') attached to their parent issue.
+        """
+        if not raw:
+            return []
+
+        issues: List[str] = []
+        current: Optional[str] = None
+
+        for line in raw.split("\n"):
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            match = self._ISSUE_START.match(stripped)
+            if match:
+                if current:
+                    issues.append(current.strip())
+                current = stripped
+                continue
+
+            if current is not None:
+                # Continuation: fold into the current issue.
+                current += " " + stripped
+                continue
+
+            # Text before any numbered issue: treat the whole block as one
+            # issue so nothing is silently dropped.
+            current = stripped
+
+        if current:
+            issues.append(current.strip())
+
+        return issues
+
+    def _compute_passed(self, issues: List[str]) -> bool:
+        """
+        Decide pass/fail from the parsed severity fields.
+
+        The previous implementation searched for the word 'error' anywhere
+        in the text, so a reassuring "No errors detected" was read as a
+        failure.
+        """
+        for issue in issues:
+            match = self._SEVERITY.search(issue)
+            if match and match.group(1).lower() == "error":
+                return False
+        return True
+
+    # ------------------------------------------------------------------ #
+    # Helpers                                                               #
+    # ------------------------------------------------------------------ #
 
     @staticmethod
     def _format_extraction_summary(entities_data: List[dict], graph_summary: dict) -> str:
@@ -297,15 +386,23 @@ Keep the report under 300 words. Use markdown formatting.
         return "\n".join(lines)
 
     @staticmethod
-    def _fallback_report(rule_based_issues: List[dict]) -> dict:
-        """Generate a basic report when LLM is unavailable."""
+    def _fallback_report(rule_based_issues: List[dict], reason: str = "") -> dict:
+        """
+        Generate a report when the LLM stage could not run.
+
+        The result is explicitly flagged ``degraded`` so the API and the
+        Excel sheet can say so, rather than passing off a rule-only report
+        as a full validation result.
+        """
         error_count = sum(1 for i in rule_based_issues if i.get("severity") == "error")
         warning_count = sum(1 for i in rule_based_issues if i.get("severity") == "warning")
+
+        reason_line = f"\n\n**Reason:** {reason}" if reason else ""
 
         report = f"""# P&ID Extraction Validation Report
 
 ## Overall Assessment
-**LLM validation unavailable** — showing rule-based results only.
+**LLM validation did not run** — showing rule-based results only.{reason_line}
 
 ## Rule-Based Findings
 - **Errors:** {error_count}
@@ -313,15 +410,17 @@ Keep the report under 300 words. Use markdown formatting.
 - **Total issues:** {len(rule_based_issues)}
 
 ## Recommendations
-1. Configure a Groq API key for full LLM-powered validation
-2. Review entities flagged with low confidence scores
-3. Verify duplicate tags and orphan nodes manually
+1. Review entities flagged with low confidence scores
+2. Verify duplicate tags and orphan nodes manually
+3. Check the LLM validation configuration if AI validation was expected
 
-*Note: Set GROQ_API_KEY in your .env file for AI-powered validation.*
+*This report contains deterministic rule findings only. The LLM review did not run.*
 """
         return {
-            "llm_analysis": "LLM unavailable",
+            "llm_analysis": "LLM validation did not run",
             "llm_issues": [],
             "report": report,
             "passed": error_count == 0,
+            "degraded": True,
+            "degraded_reason": reason,
         }

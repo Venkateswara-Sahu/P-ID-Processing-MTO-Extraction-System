@@ -72,29 +72,43 @@ class SymbolDetector:
             iou_threshold: NMS IoU threshold.
             image_size: Input image size for the model.
         """
-        self.model_path = model_path or settings.yolo_model_path
-        self.confidence_threshold = confidence_threshold or settings.yolo_confidence_threshold
-        self.iou_threshold = iou_threshold or settings.yolo_iou_threshold
-        self.image_size = image_size or settings.yolo_image_size
+        self.model_path = model_path if model_path is not None else settings.yolo_model_path
+        self.confidence_threshold = (
+            confidence_threshold
+            if confidence_threshold is not None
+            else settings.yolo_confidence_threshold
+        )
+        self.iou_threshold = (
+            iou_threshold if iou_threshold is not None else settings.yolo_iou_threshold
+        )
+        self.image_size = image_size if image_size is not None else settings.yolo_image_size
         self.model = None
 
     def load_model(self):
-        """Load the YOLOv8 model. Lazy-loaded on first detection call."""
+        """
+        Load the YOLOv8 model. Lazy-loaded on first detection call.
+
+        Raises:
+            FileNotFoundError: if the trained weights are missing. Falling
+                back to the COCO model would emit 80 unrelated classes
+                ('person', 'car', 'clock') as if they were P&ID symbols and
+                produce a garbage MTO that still reports success.
+        """
         from ultralytics import YOLO
 
         model_path = Path(self.model_path)
 
-        if model_path.exists():
-            logger.info(f"Loading trained YOLOv8 model from: {model_path}")
-            self.model = YOLO(str(model_path))
-        else:
-            # Fall back to pre-trained YOLOv8s for demo purposes
-            logger.warning(
-                f"Trained model not found at {model_path}. "
-                "Loading pre-trained YOLOv8s (COCO). "
-                "Train a custom model using the Colab notebook for P&ID symbols."
+        if not model_path.exists():
+            raise FileNotFoundError(
+                f"Trained YOLOv8 weights not found at {model_path}. "
+                "Place your trained weights there (see "
+                "notebooks/01_yolo_training.ipynb) or set YOLO_MODEL_PATH. "
+                "This pipeline will not fall back to the COCO model, which has "
+                "no P&ID classes."
             )
-            self.model = YOLO("yolov8s.pt")
+
+        logger.info(f"Loading trained YOLOv8 model from: {model_path}")
+        self.model = YOLO(str(model_path))
 
         # Force CPU inference (no CUDA on Intel Iris Xe)
         self.model.to("cpu")

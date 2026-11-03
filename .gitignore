@@ -49,3 +49,41 @@ data/output/temp/
 dist/
 build/
 *.egg-info/
+
+# ── Test / lint caches ───────────────────────────────────────
+# pytest's own temp directory
+.pytest_tmp/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.ruff_cache/
+.mypy_cache/
+
+# ── Ultralytics training runs ────────────────────────────────
+# train/val outputs, weights, plots and per-run CSVs
+runs/
+
+# ── Downloaded training datasets ─────────────────────────────
+# Pulled from Roboflow by the training notebook; thousands of
+# images and labels, never part of the source tree.
+dataset/
+dataset_repaired/
+
+# ── Model weights fetched by training runs ────────────────────
+# The training notebook downloads these; they are large and are not
+# part of the source tree.
+yolov8n.pt
+yolov8s.pt
+yolov8m.pt
+yolov8l.pt
+yolov8x.pt
+yolo11n.pt
+yolo11s.pt
+
+# ── Generated training data ───────────────────────────────────
+# The glyph catalogue and seed annotations ARE tracked; the thousands
+# of synthesised sheets they produce are not.
+data/target_style/generated/
+data/**/labels.cache
+*.cache

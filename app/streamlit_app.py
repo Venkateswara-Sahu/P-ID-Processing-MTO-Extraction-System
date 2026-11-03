@@ -29,6 +29,20 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+
+@st.cache_resource(show_spinner=False)
+def get_pipeline():
+    """
+    Return the shared PIDPipeline instance.
+
+    Cached across Streamlit reruns so the 22MB YOLOv8 model is loaded
+    once, not on every click.
+    """
+    from src.pipeline import PIDPipeline
+
+    return PIDPipeline()
+
+
 # Custom CSS for premium look
 st.markdown("""
 <style>
@@ -237,7 +251,7 @@ def main():
             st.markdown("""
             <div class="metric-card">
                 <h3>📝</h3>
-                <p><b>OCR Extraction</b><br>PaddleOCR reads tags, line numbers, specs</p>
+                <p><b>OCR Extraction</b><br>Tesseract reads tags, line numbers, specs</p>
             </div>
             """, unsafe_allow_html=True)
 
@@ -252,12 +266,12 @@ def main():
 
 def _run_pipeline(input_source, project_name, run_llm, confidence_threshold):
     """Run the extraction pipeline with progress display."""
-    from src.pipeline import PIDPipeline
-
     progress_bar = st.progress(0, text="Initializing pipeline...")
 
     try:
-        pipe = PIDPipeline()
+        # Cached across reruns: without this the 22MB YOLOv8 model was
+        # reloaded from disk on every click.
+        pipe = get_pipeline()
 
         progress_bar.progress(10, text="🔧 Preprocessing image...")
         time.sleep(0.3)

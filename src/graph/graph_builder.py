@@ -57,6 +57,9 @@ class PIDGraphBuilder:
             description=entity.description,
             category=entity.component_category,
             position=entity.position,
+            # Read the confidence at build time. The scorer may rewrite
+            # entity.confidence afterwards, so the node must be refreshed
+            # to stay in step with the MTO.
             confidence=entity.confidence,
             size=entity.size,
             specification=entity.specification,
@@ -64,6 +67,18 @@ class PIDGraphBuilder:
             # Store full entity reference
             entity=entity,
         )
+
+    def sync_confidence(self, entities: List[EngineeringEntity]) -> None:
+        """
+        Copy the current entity confidence onto the matching graph nodes.
+
+        The confidence scorer overwrites ``entity.confidence`` after the
+        graph is built, so without this the graph keeps a pre-scoring value
+        and the two views of the same run disagree.
+        """
+        for entity in entities:
+            if entity.entity_id in self.graph:
+                self.graph.nodes[entity.entity_id]["confidence"] = entity.confidence
 
     def _infer_connections(
         self,

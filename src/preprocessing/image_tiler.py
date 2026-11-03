@@ -7,6 +7,7 @@ for YOLOv8 detection, then merges results back to original coordinates.
 """
 
 import logging
+import math
 from dataclasses import dataclass, field
 from typing import List, Tuple
 
@@ -29,6 +30,28 @@ class Tile:
     tile_height: int
     row: int
     col: int
+    # True when the corresponding tile edge is an INTERNAL cut rather than
+    # the image border. A symbol touching an internal edge is sliced in
+    # half by the boundary, so the detector sees a partial shape - which
+    # is a false positive, not a detection.
+    cut_left: bool = False
+    cut_right: bool = False
+    cut_top: bool = False
+    cut_bottom: bool = False
+
+    def cut_edges(self) -> Tuple[float, float, float, float]:
+        """
+        The tile's edge coordinates in ORIGINAL image space.
+
+        Returns (left, top, right, bottom) where each value is the
+        coordinate of that edge in the original image, or None-equivalent
+        (a negative value) for edges that are not cuts.
+        """
+        left = self.x_offset if self.cut_left else -1.0
+        top = self.y_offset if self.cut_top else -1.0
+        right = (self.x_offset + self.tile_width) if self.cut_right else -1.0
+        bottom = (self.y_offset + self.tile_height) if self.cut_bottom else -1.0
+        return (left, top, right, bottom)
 
 
 @dataclass
@@ -55,13 +78,50 @@ class ImageTiler:
             tile_size: Size of each tile in pixels (square tiles).
             overlap: Overlap between adjacent tiles in pixels.
         """
-        self.tile_size = tile_size or settings.tile_size
-        self.overlap = overlap or settings.tile_overlap
+        self.tile_size = tile_size if tile_size is not None else settings.tile_size
+        self.overlap = overlap if overlap is not None else settings.tile_overlap
+        if not (0 <= self.overlap < self.tile_size):
+            raise ValueError(
+                f"overlap ({self.overlap}) must be in [0, tile_size={self.tile_size}); "
+                "otherwise the tiling stride is zero or negative and tiling never ends"
+            )
         self.stride = self.tile_size - self.overlap
+
+    def _axis_starts(self, extent: int) -> List[int]:
+        """
+        Compute the tile start offsets along one axis.
+
+        The number of tiles is derived from the stride, and the tiles are
+        then spaced EVENLY across the axis. The previous approach kept
+        the stride for every tile and back-shifted the final one to end
+        flush with the image, which made that tile overlap the previous one
+        by up to 639px -- roughly 90% redundant inference, and it doubled
+        the tile count for some widths.
+
+        Even spacing keeps the overlap uniform and never larger than the
+        configured one by more than rounding.
+        """
+        if extent <= self.tile_size:
+            return [0]
+
+        # How many tiles are needed at the configured stride?
+        n_tiles = math.ceil((extent - self.tile_size) / self.stride) + 1
+        n_tiles = max(2, n_tiles)
+
+        # Space them evenly from 0 to the flush position.
+        flush = extent - self.tile_size
+        spacing = flush / (n_tiles - 1)
+
+        starts = []
+        for i in range(n_tiles):
+            start = int(round(i * spacing))
+            if start not in starts:
+                starts.append(start)
+        return starts
 
     def tile(self, image: np.ndarray) -> TilingResult:
         """
-        Split a large image into overlapping tiles.
+        Split a large image into overlapping tiles for detection.
 
         Args:
             image: Input image as numpy array (BGR format).
@@ -84,6 +144,12 @@ class ImageTiler:
                 tile_height=h,
                 row=0,
                 col=0,
+                # A single tile has no internal boundaries: every edge is
+                # the image border, so nothing is ever "cut".
+                cut_left=False,
+                cut_right=False,
+                cut_top=False,
+                cut_bottom=False,
             )
             return TilingResult(
                 tiles=[tile],
@@ -95,20 +161,14 @@ class ImageTiler:
                 num_cols=1,
             )
 
+        x_starts = self._axis_starts(w)
+        y_starts = self._axis_starts(h)
+
         tiles = []
-        row_idx = 0
-
-        y = 0
-        while y < h:
-            col_idx = 0
-            x = 0
-
-            while x < w:
-                # Calculate crop boundaries
-                x_end = min(x + self.tile_size, w)
-                y_end = min(y + self.tile_size, h)
-                x_start = max(0, x_end - self.tile_size)
-                y_start = max(0, y_end - self.tile_size)
+        for row_idx, y_start in enumerate(y_starts):
+            y_end = min(y_start + self.tile_size, h)
+            for col_idx, x_start in enumerate(x_starts):
+                x_end = min(x_start + self.tile_size, w)
 
                 # Crop tile
                 tile_img = image[y_start:y_end, x_start:x_end].copy()
@@ -130,18 +190,14 @@ class ImageTiler:
                     tile_height=y_end - y_start,
                     row=row_idx,
                     col=col_idx,
+                    # An edge is a CUT when the tile does not reach the
+                    # image border on that side.
+                    cut_left=x_start > 0,
+                    cut_right=x_end < w,
+                    cut_top=y_start > 0,
+                    cut_bottom=y_end < h,
                 )
                 tiles.append(tile)
-
-                col_idx += 1
-                x += self.stride
-                if x_end >= w:
-                    break
-
-            row_idx += 1
-            y += self.stride
-            if y_end >= h:
-                break
 
         result = TilingResult(
             tiles=tiles,
@@ -149,8 +205,8 @@ class ImageTiler:
             original_height=h,
             tile_size=self.tile_size,
             overlap=self.overlap,
-            num_rows=row_idx,
-            num_cols=col_idx,
+            num_rows=len(y_starts),
+            num_cols=len(x_starts),
         )
 
         logger.info(f"Generated {len(tiles)} tiles ({result.num_rows} rows × {result.num_cols} cols)")
@@ -178,32 +234,3 @@ class ImageTiler:
             x2 + tile.x_offset,
             y2 + tile.y_offset,
         )
-
-    @staticmethod
-    def stitch_visualization(
-        tiles: List[Tile],
-        original_width: int,
-        original_height: int,
-    ) -> np.ndarray:
-        """
-        Stitch tiles back into the original image (for visualization).
-
-        Args:
-            tiles: List of Tile objects.
-            original_width: Width of the original image.
-            original_height: Height of the original image.
-
-        Returns:
-            Stitched image as numpy array.
-        """
-        canvas = np.zeros((original_height, original_width, 3), dtype=np.uint8)
-
-        for tile in tiles:
-            h = tile.tile_height
-            w = tile.tile_width
-            canvas[
-                tile.y_offset: tile.y_offset + h,
-                tile.x_offset: tile.x_offset + w,
-            ] = tile.image[:h, :w]
-
-        return canvas

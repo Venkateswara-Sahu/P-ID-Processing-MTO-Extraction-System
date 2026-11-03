@@ -146,7 +146,10 @@ class RelationshipResolver:
             if data.get("entity_type") == "instrument"
         ]
 
-        # Group instruments by loop number
+        # Group instruments by loop number. A node can carry several tags
+        # that share a loop number, so members are de-duplicated -- otherwise
+        # the same node appears twice in `members` and the resolver adds an
+        # edge from the node to itself.
         loop_groups: Dict[str, List[str]] = {}
         for node_id, data in instruments:
             entity = data.get("entity")
@@ -156,7 +159,8 @@ class RelationshipResolver:
                         key = tag.loop_number
                         if key not in loop_groups:
                             loop_groups[key] = []
-                        loop_groups[key].append(node_id)
+                        if node_id not in loop_groups[key]:
+                            loop_groups[key].append(node_id)
 
         # Add loop metadata
         loop_count = 0
@@ -169,10 +173,13 @@ class RelationshipResolver:
 
                 # Ensure loop members are connected
                 for i in range(len(members) - 1):
-                    if not graph.has_edge(members[i], members[i + 1]):
+                    source, target = members[i], members[i + 1]
+                    if source == target:
+                        continue
+                    if not graph.has_edge(source, target):
                         graph.add_edge(
-                            members[i],
-                            members[i + 1],
+                            source,
+                            target,
                             connection_type="signal",
                             weight=50,
                             loop_id=loop_id,

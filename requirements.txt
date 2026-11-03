@@ -5,12 +5,17 @@ Pillow>=10.0.0
 numpy>=1.24.0
 
 # ---- PDF Processing ----
-pdf2image>=1.17.0
+# PyMuPDF is the engine actually used. pdf2image is kept as a fallback
+# for environments where poppler is unavailable.
 PyMuPDF>=1.24.0
+pdf2image>=1.17.0
 
 # ---- OCR ----
-easyocr>=1.7.0
+# Tesseract is the primary engine (the binary must be installed separately:
+# https://github.com/UB-Mannheim/tesseract/wiki). EasyOCR is the
+# automatic fallback when the Tesseract binary is not found.
 pytesseract>=0.3.10
+easyocr>=1.7.0
 
 # ---- Graph ----
 networkx>=3.2.0

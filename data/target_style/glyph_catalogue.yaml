@@ -1,0 +1,67 @@
+# Glyph catalogue for the target drawing style.
+#
+# The glyphs below were extracted from data/sample_pids/plant-pid.png
+# (650 x 394) and each box was verified by eye against the drawing.
+# This is the seed material for tools/augment_target.py, which
+# synthesises more sheets in the same style with exact ground truth.
+#
+# Class names match the CANONICAL vocabulary of the repaired Roboflow
+# dataset (218 classes), so a generated dataset can be merged with it
+# by name - see tools/merge_datasets.py.
+#
+# box: [x1, y1, x2, y2] in the 650x394 source image
+
+source_image: data/sample_pids/plant-pid.png
+source_size: [650, 394]
+
+# The class vocabulary the generator emits.
+vocabulary:
+  - Centrifugal Pump
+  - Heat Exchanger
+  - Vertical Vessel
+  - Horizontal Vessel
+  - Mixing Reactor
+  - Gate_Valve
+  - Tank
+
+glyphs:
+  # ---- pump: circle with the impeller drawn as a diagonal ----
+  - {cls: Centrifugal Pump, tag: E-1001, box: [126, 192, 150, 220]}
+  - {cls: Centrifugal Pump, tag: E-1003, box: [280, 238, 303, 266]}
+  - {cls: Centrifugal Pump, tag: E-1004, box: [313, 221, 341, 244]}
+  - {cls: Centrifugal Pump, tag: E-1006, box: [428,  63, 450,  85]}
+  - {cls: Centrifugal Pump, tag: E-1006, box: [418, 327, 444, 349]}
+  - {cls: Centrifugal Pump, tag: CW,    box: [530, 174, 552, 195]}
+  - {cls: Centrifugal Pump, tag: CW,    box: [538, 342, 562, 363]}
+
+  # ---- pump with a discharge bend (a DIFFERENT glyph) ----
+  - {cls: Centrifugal Pump, tag: P-1002A/B, box: [412, 106, 456, 152]}
+  - {cls: Centrifugal Pump, tag: P-1003A/B, box: [508, 216, 552, 260]}
+
+  # ---- reactor: vessel with a large X inside ----
+  - {cls: Mixing Reactor, tag: R-1001, box: [192, 87, 225, 150]}
+
+  # ---- heat exchanger: rectangle with an internal coil ----
+  - {cls: Heat Exchanger, tag: E-1002, box: [190, 179, 226, 254]}
+
+  # ---- columns: tall cylinder with horizontal tray dashes ----
+  - {cls: Vertical Vessel, tag: T-1001, box: [336,  74, 369, 203]}
+  - {cls: Vertical Vessel, tag: T-1002, box: [446, 174, 479, 303]}
+
+  # ---- horizontal drums: rounded-rectangle body ----
+  - {cls: Horizontal Vessel, tag: E-1005, box: [414,  84, 482, 126]}
+  - {cls: Horizontal Vessel, tag: E-1007, box: [506, 190, 568, 228]}
+
+  # ---- half-filled circle: a tank / drum with a level indication ----
+  - {cls: Tank, tag: METHANOL, box: [14, 34, 46, 60]}
+
+  # ---- valves: bowtie / hourglass ----
+  - {cls: Gate_Valve, tag: "", box: [128,  72, 148, 100]}
+  - {cls: Gate_Valve, tag: "", box: [383, 114, 409, 137]}
+  - {cls: Gate_Valve, tag: "", box: [471,  25, 498,  47]}
+  - {cls: Gate_Valve, tag: "", box: [503, 106, 527, 140]}
+  - {cls: Gate_Valve, tag: "", box: [229, 221, 246, 248]}
+  - {cls: Gate_Valve, tag: "", box: [279, 181, 300, 211]}
+  - {cls: Gate_Valve, tag: "", box: [386, 229, 418, 258]}
+  - {cls: Gate_Valve, tag: "", box: [483, 222, 508, 244]}
+  - {cls: Gate_Valve, tag: "", box: [493, 337, 525, 365]}

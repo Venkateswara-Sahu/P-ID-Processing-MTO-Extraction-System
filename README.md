@@ -114,6 +114,110 @@ Place your trained weights at `models/best.pt`.
 > **Training your own model:** Open `notebooks/01_yolo_training.ipynb` in Google Colab.  
 > Dataset: [Roboflow P&ID Object Detection](https://roboflow.com) — requires a free Roboflow account.
 
+**Before you train, read [`MODEL_DATASET_AUDIT.md`](MODEL_DATASET_AUDIT.md).**
+It documents what is actually wrong with the shipped dataset and model:
+498 test images that are byte-identical to training images, 7 groups of
+duplicate class names, a 20,572× class imbalance, and a training recipe
+whose `erasing=0.4` default was deleting symbols out of every image.
+
+Two tools come with it:
+
+```bash
+# Merge duplicate classes, fix misspellings, dedupe, re-split leak-free
+python tools/repair_dataset.py --src dataset/ --dst dataset_repaired/
+
+# Per-class evaluation — shows how many classes were never even scored
+python tools/evaluate_model.py --model models/best.pt --data dataset_repaired/
+```
+
+### 4b. Train on Google Colab
+
+`notebooks/01_yolo_training.ipynb` is self-contained: the repository's
+tools are **embedded in the notebook**, so it runs whether or not the
+repo has been pushed. The data pipeline (download → repair → merge →
+train → evaluate) has been dry-run end to end locally.
+
+```
+1. Open the notebook in Colab, Runtime → GPU (T4)
+2. Set the key once:
+     from google.colab import userdata
+     userdata.put("ROBOFLOW_API_KEY", "<your key>")
+3. Runtime → Run all
+4. Download best.pt → copy to models/best.pt
+```
+
+The run produces a checkpoint with **218 classes**, not 229 — the
+duplicate spellings were merged. The old 229-class checkpoint is not
+interchangeable with it, and `tools/evaluate_model.py` refuses to
+evaluate a model whose class list does not match the dataset's, so the
+mismatch cannot produce a plausible-looking but meaningless mAP.
+
+**What training will and will not fix.** Fine-tuning on the repaired
+Roboflow set improves the 218 Roboflow classes, including the 139 that
+had fewer than 50 training instances. It will **not** teach the model
+your drawing style: `Centrifugal Pump` already has 2,013 instances and
+mAP50 0.935, and it still misses 6 of 8 pumps on the sample P&ID,
+because the glyph is drawn differently. For that you need target-style
+data — see `MODEL_DATASET_AUDIT.md` §6.
+
+### 4c. Build a target-style training set (optional but recommended)
+
+The shipped model finds the valves on your drawings and **none** of the
+vessels, columns, exchangers or reactors — not because of a data-volume
+problem, but because the glyphs are drawn differently. `Centrifugal Pump`
+already has 2,013 training instances and mAP50 0.935, and it still
+misses 6 of 8 pumps on the sample P&ID.
+
+Because the target style is clean thin black line art with no scan
+noise, it can be **synthesised with exact ground truth**:
+
+```bash
+# 1. generate sheets in the target style (exact boxes, no annotation)
+python tools/augment_target.py --count 600 --out data/target_style/generated/
+
+# 2. merge them into the repaired Roboflow dataset (ids remapped by name)
+python tools/merge_datasets.py \
+    --base dataset_repaired/ \
+    --extra data/target_style/generated/ \
+    --dst dataset_merged/ \
+    --extra-repeat 3
+```
+
+The glyphs come from `data/target_style/glyph_catalogue.yaml`, which was
+extracted from `data/sample_pids/plant-pid.png` and verified box by box.
+`tools/annotate_target.py` can propose boxes for new drawings
+automatically (it found 7 of the 9 pumps and 9 of the 9 valves on the
+sample) — but at this resolution it is ~70% accurate, so a human still
+has to correct it. That is the point of a *semi-automatic* annotator:
+a person fixes 5 boxes instead of drawing 30.
+
+To generate the sheets:
+
+```bash
+python tools/augment_target.py --count 600 --out data/target_style/generated/
+```
+
+Then upload `dataset_merged/` to Colab and set `USE_TARGET_STYLE = True`
+in the notebook's Step 3b.
+
+> **Honest limitation:** synthetic sheets teach the model the *glyphs*.
+> They do not teach real process topology or the noise of a scanned
+> original. A handful of real annotated drawings from your own style
+> would be better than any amount of generated data — and if you have
+> them, that is the better path.
+
+**Measured: it works.** 600 synthetic sheets → a YOLOv8n trained on
+them → run on the real sample P&ID:
+
+| | Shipped model | Trained on synthetic target style |
+|---|---|---|
+| Total detections | 11 | **26** |
+| **Equipment detections** | **2** | **20** |
+| Pumps / vessels / tanks / columns / exchangers / reactors | 2, and nothing else | 10 / 3 / 3 / 2 / 1 / 1 |
+
+The classes the shipped model could not see at all are now detected on
+the real drawing. Full method and caveats: `MODEL_DATASET_AUDIT.md` §6.7.
+
 ### 5. Run the Dashboard
 
 ```bash
@@ -121,6 +225,33 @@ streamlit run app/streamlit_app.py
 ```
 
 Open **http://localhost:8501** → Upload a P&ID image or PDF → Click **Extract MTO**.
+
+### 6. Run the Tests
+
+```bash
+pytest tests/ -q
+```
+
+The suite covers the tag parser, the OCR/entity mapping, the graph, the
+MTO generator, the API, the class taxonomy, and an end-to-end pipeline
+run on the sample drawing. It is the fastest way to check that a change
+did not regress extraction quality.
+
+### 7. Detection configuration
+
+`TILE_SIZE` in `.env` must match the resolution the model was trained at.
+The shipped model was trained at `YOLO_IMAGE_SIZE=640` on images that
+were 640×640 and 1312×1312, so `TILE_SIZE=1312` reproduces the training
+scale. Measured on the dataset's own validation split:
+
+| Configuration | F1 |
+|---|---|
+| whole image, no tiling | 0.970 |
+| tile 640 at native scale | 0.773 |
+| tile 640 after a 1.6× upscale | 0.462 |
+| **tile 1312 + drop boundary-cut detections** | **0.958** (on a 3936 px sheet) |
+
+If you retrain at a different `imgsz`, set `TILE_SIZE` to match.
 
 ---
 
@@ -144,6 +275,7 @@ P-ID-Processing-MTO-Extraction-System/
 │   ├── graph/
 │   │   ├── entity_mapper.py     # Symbol-text spatial association
 │   │   ├── graph_builder.py     # NetworkX graph construction
+│   │   ├── class_map.py         # Model class → MTO category taxonomy
 │   │   └── relationship_resolver.py  # Line assignment, loop detection
 │   ├── validation/
 │   │   ├── engineering_rules.py # Deterministic validation rules
@@ -156,12 +288,23 @@ P-ID-Processing-MTO-Extraction-System/
 ├── app/
 │   ├── api.py                   # FastAPI REST backend
 │   └── streamlit_app.py         # Streamlit dashboard
+├── tools/
+│   ├── repair_dataset.py        # Merge duplicate classes, dedupe, leak-free re-split
+│   ├── merge_datasets.py        # Merge a target-style dataset in, remapping ids by name
+│   ├── evaluate_model.py        # Per-class evaluation; refuses class-list mismatches
+│   ├── annotate_target.py       # Semi-automatic annotator for target-style drawings
+│   └── build_notebook.py        # Regenerates the Colab notebook with tools embedded
+├── tests/                       # 263 pytest tests
 ├── notebooks/
 │   └── 01_yolo_training.ipynb   # Google Colab training notebook
 ├── models/                      # Place trained YOLOv8 weights here (best.pt)
 ├── data/
 │   ├── sample_pids/             # Sample P&ID images for testing
+│   ├── target_style/            # Seed annotations for the target-style training set
 │   └── output/                  # Generated MTO files (git-ignored)
+├── AUDIT_REPORT.md              # Codebase audit + fix roadmap
+├── MODEL_DATASET_AUDIT.md       # Dataset + model audit (measured)
+├── pytest.ini
 ├── .env.example                 # Environment variable template
 └── requirements.txt
 ```
@@ -187,7 +330,7 @@ In the recorded project test, this change reduced OCR processing from approximat
 
 ## 🤖 LLM Validation Agent (LangGraph + Groq)
 
-The validation pipeline uses a **3-node LangGraph agent** powered by **Groq (Llama 3.3 70B)** — only runs if `GROQ_API_KEY` is set:
+The validation pipeline uses a **3-node LangGraph agent** powered by **Groq** — only runs if `GROQ_API_KEY` is set:
 
 ```mermaid
 graph LR
@@ -195,13 +338,24 @@ graph LR
     B --> C["📝 Reporter<br/>Generates validation report"]
 ```
 
-**Engineering validation rules:**
+> **Model:** `openai/gpt-oss-120b` (see `GROQ_MODEL` in `.env.example`).
+> The previously-configured `llama-3.3-70b-versatile` was retired by Groq and
+> returns HTTP 404, which made this stage silently never run. If LLM
+> validation cannot run, the report says so explicitly and the MTO is
+> flagged as degraded rather than passing off a rule-only report as a full
+> validation result.
+
+**Engineering validation rules** (deterministic, always run):
 - `R001`: Tag completeness — every detected symbol should have a tag
 - `R002`: Tag uniqueness — no duplicate tag IDs  
 - `R003`: Instrument loop integrity — measurement + control elements
 - `R004`: Low confidence flagging — entities needing human review
 - `R005`: Orphan node detection — isolated components
 - `R006`: Valve connection check — inlet + outlet requirements
+
+These findings are written to the **"Rule Validation"** sheet of the MTO
+workbook, so the spreadsheet carries machine-readable validation data and
+not just the LLM's prose.
 
 ---
 
@@ -232,21 +386,29 @@ graph LR
 - One-click Excel + JSON + annotated image download
 
 ### MTO Excel
-Items grouped by category (Equipment, Valves, Instruments, Piping, Other):
 
-| Item | Tag Number | Description | Type | Size | Confidence |
-|------|------------|-------------|------|------|-----------|
-| 1 | E-1001 | Heat Exchanger | Equipment | — | 82% |
-| 2 | P-1001A/B | Centrifugal Pump | Equipment | — | 78% |
-| 3 | Gate_Valve | Gate Valve | Valve | 4" | 71% |
+Items are grouped by category (Equipment, Valves, Instruments, Piping, Other)
+and **identical items are aggregated into a single line with a real
+quantity**, because an MTO is a procurement document:
+
+| Item | Tag Number | Description | Type | Size | Qty | Confidence |
+|------|------------|-------------|------|------|-----|-----------|
+| 1 | E-1003, E-1006, E-1008 | Heat Exchanger | Equipment | — | 3 | 69% |
+| 2 | P-101A, P-101B | Centrifugal Pump | Equipment | — | 2 | 48% |
+| 3 | HV-1001, HV-1002, HV-1003 | Gate Valve | Valve | 4" | 3 | 62% |
+
+The workbook contains three sheets: **Material Take-Off**, **Rule
+Validation** (the deterministic R001–R006 findings) and **LLM Report**.
 
 ---
 
 ## ⚠️ Current Limitations
 
 - **YOLO model accuracy** depends on the P&ID symbol style it was trained on. The included training notebook uses a publicly available Roboflow dataset. Re-train on your own drawings for best results.
-- **OCR accuracy** on very small or overlapping labels may be limited without a higher-resolution scan.
-- **LLM validation** requires a free Groq API key (`GROQ_API_KEY` in `.env`). Without it, only rule-based validation runs.
+- **OCR accuracy** on very small or overlapping labels may be limited without a higher-resolution scan. The OCR confidence threshold is deliberately low (`0.2`) because Tesseract's per-word confidence is unreliable on line art — the tag parser rejects noise instead.
+- **LLM validation** requires a free Groq API key (`GROQ_API_KEY` in `.env`). Without it, only rule-based validation runs, and the report says so.
+- **No pipe-run tracing.** The model detects *symbols*; it has no "pipe segment" class, so piping connectivity and line numbers are inferred from proximity and label association rather than traced along the actual pipe. This is the largest remaining accuracy gap.
+- **Symbol recall is limited by the trained model**, not by the pipeline: on the included sample, roughly 25–30 symbols are visible and about 11 are detected.
 - **Prototype scope**: extracted records require human review; the project has not been validated on a representative industrial drawing corpus.
 - **Tag conventions**: rule-based parsing is inspired by common engineering tag formats and is not a certification of complete ISA-5.1 compliance.
 

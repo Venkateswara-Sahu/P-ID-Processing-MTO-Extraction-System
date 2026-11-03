@@ -4,6 +4,24 @@ Engineering Tag Parser for P&ID text.
 Parses OCR-extracted text into structured engineering entities
 following ISA (International Society of Automation) standards
 and common P&ID naming conventions.
+
+Tag grammar implemented here:
+
+===================  ==========================================  ==========
+Form                 Example                                     Type
+===================  ==========================================  ==========
+``X-101``            ``P-101A``, ``E-1001``, ``R-1001``          Equipment
+``XX-101``           ``FIC-1001``, ``PSV-201``, ``TT-301/302``   Instrument
+``6"-PA-1001-A1A-N`` line numbers                              Line number
+``6"``               pipe sizes (inch mark required)            Pipe size
+``150#``             ratings / material grades                   Specification
+===================  ==========================================  ==========
+
+The key distinction is **prefix length**: a one-letter prefix is equipment
+(``P`` pump, ``E`` exchanger, ``V`` vessel), while a two-to-four letter
+prefix is an ISA instrument code (``FIC``, ``PSV``). Trying the instrument
+pattern first silently converted every equipment tag into an instrument tag
+(``P-101A`` became "Pressure"), so the two are matched on length.
 """
 
 import logging
@@ -55,16 +73,25 @@ class TagParser:
 
     # ---- Regex Patterns ----
 
-    # Instrument tags: FV-101, PI-202A, TT-301/302, FIC-401
+    # Instrument tags: 2-4 letters + loop number + optional suffix.
+    #   FIC-1001, PSV-201, TT-301/302, PIC-201A
     INSTRUMENT_PATTERN = re.compile(
-        r"^([A-Z]{1,4})[- ]?(\d{2,5})([A-Z])?(?:\s*/\s*(\d{2,5}))?$",
-        re.IGNORECASE,
+        r"^([A-Z]{2,4})[- ]?(\d{1,5})([A-Z])?(?:\s*/\s*(\d{1,5}))?$",
     )
 
-    # Equipment tags: P-101, E-201 A/B, V-301, R-101
+    # Letter-only instrument codes: PSHH, LSH, TSH.
+    INSTRUMENT_LETTERS_ONLY_PATTERN = re.compile(r"^([A-Z]{2,4})$")
+
+    # Single-letter instrument tags: A-101 (analysis), D-101 (density).
+    # Only applies to letters that are NOT equipment letters.
+    SINGLE_LETTER_INSTRUMENT_PATTERN = re.compile(
+        r"^([A-Z])([- ]?)(\d{1,5})$",
+    )
+
+    # Equipment tags: one letter + loop number + optional suffix.
+    #   P-101A, E-1001, R-1001, V-3040, E-201 A/B
     EQUIPMENT_PATTERN = re.compile(
-        r"^([A-Z]{1,3})[- ]?(\d{2,5})\s*([A-Z](?:\s*/\s*[A-Z])?)?$",
-        re.IGNORECASE,
+        r"^([A-Z])([- ]?)(\d{1,5})\s*([A-Z](?:\s*/\s*[A-Z])?)?$",
     )
 
     # Line numbers: 6"-PA-1001-A1A-N, 2"-CW-2001-B1B
@@ -73,9 +100,11 @@ class TagParser:
         re.IGNORECASE,
     )
 
-    # Pipe size: 2", 6", 10", 3/4"
+    # Pipe size: 2", 6", 10", 3/4"  -- the inch mark is REQUIRED.
+    # Bare numbers are stream numbers, which are far more common on a P&ID
+    # and were previously being read as pipe diameters.
     PIPE_SIZE_PATTERN = re.compile(
-        r'^(\d{1,2}(?:/\d{1,2})?)\s*["\u201d]?$',
+        r'^(\d{1,2}(?:/\d{1,2})?)\s*["\u201d]$',
     )
 
     # Specification: 150#, 300# RF, CS, SS304
@@ -120,11 +149,29 @@ class TagParser:
         "VT": "Vent",
     }
 
-    # Common OCR character confusions in engineering tag context
+    # Two-letter ISA instrument prefixes that are real codes. Used to decide
+    # whether an OCR'd trailing vowel is noise ("Re1001" -> R-1001) or part of
+    # a legitimate prefix ("TE101" -> Temperature Element, TE-101).
+    KNOWN_INSTRUMENT_PREFIXES = frozenset({
+        "AE", "AI", "AR", "AS", "AT", "AV",
+        "CE", "CI", "CR", "CS", "CT", "CV",
+        "FE", "FI", "FC", "FQ", "FS", "FT", "FV",
+        "HE", "HI", "HK", "HS", "HV",
+        "IE", "II", "IR", "IS", "IT",
+        "LE", "LI", "LR", "LS", "LT", "LV",
+        "ME", "MF", "MI", "MR", "MS", "MT",
+        "PE", "PI", "PQ", "PR", "PS", "PT", "PV",
+        "SE", "SI", "SR", "SS", "ST", "SV",
+        "TE", "TI", "TR", "TS", "TT", "TV",
+        "VE", "VI", "VR", "VS", "VT",
+        "XE", "XI", "XR",
+    })
+
+    # Common OCR character confusions in engineering tag context.
+    # Note: there is deliberately NO rule stripping a trailing vowel from a
+    # prefix ('Re' -> 'R'). It destroyed the legitimate ISA prefix 'TE'
+    # (Temperature Element) and 'PS' (Pressure Switch).
     _OCR_CORRECTIONS = [
-        # Extra vowel appended to single-letter prefix: 'Re' → 'R', 'Ee' → 'E' etc.
-        (re.compile(r'^([RTEPCVDBFKHMSX])e(\d)', re.IGNORECASE), r'\1\2'),
-        (re.compile(r'^([RTEPCVDBFKHMSX])o(\d)', re.IGNORECASE), r'\1\2'),
         # 'O' confused with '0', 'I'/'l' confused with '1'
         (re.compile(r'(?<=\d)O(?=\d|$)'), '0'),
         (re.compile(r'(?<=\d)I(?=\d|$)'), '1'),
@@ -154,25 +201,30 @@ class TagParser:
         """
         text = self._normalize_ocr(text.strip())
 
-        # Try each pattern in order of specificity
-        result = self._try_instrument_tag(text)
-        if result:
-            return result
-
-
+        # Line numbers first: they contain digits and a service code, and
+        # would otherwise be mis-read as a spec or a description.
         result = self._try_line_number(text)
         if result:
             return result
 
+        # Material grades and ratings (CS, SS304, A105, 150#) before
+        # instruments: "A105" otherwise parses as an analyser loop tag.
+        result = self._try_specification(text)
+        if result:
+            return result
+
+        # Equipment: a ONE letter prefix, and that letter must be a known
+        # equipment letter. This is what un-shadows P/E/R/V/H/T tags.
         result = self._try_equipment_tag(text)
         if result:
             return result
 
-        result = self._try_pipe_size(text)
+        # Instruments: 2-4 letter ISA prefix.
+        result = self._try_instrument_tag(text)
         if result:
             return result
 
-        result = self._try_specification(text)
+        result = self._try_pipe_size(text)
         if result:
             return result
 
@@ -206,14 +258,35 @@ class TagParser:
         return results
 
     def _try_instrument_tag(self, text: str) -> Optional[ParsedTag]:
-        """Try to parse as an instrument tag (e.g., FV-101, PI-202)."""
-        match = self.INSTRUMENT_PATTERN.match(text.upper())
-        if not match:
-            return None
+        """
+        Try to parse as an instrument tag (e.g., FIC-1001, PSV-201, PSHH).
 
-        letters = match.group(1)
-        number = match.group(2)
-        suffix = match.group(3)
+        The prefix must be 2-4 letters, the first letter must be a known ISA
+        measured variable, and every remaining letter must be a known ISA
+        function code. That last rule is what stops prose such as "PUMP 101"
+        or "LINE 12" from being manufactured into a tag.
+        """
+        match = self.INSTRUMENT_PATTERN.match(text.upper())
+        if match:
+            letters, number, suffix, second = (
+                match.group(1), match.group(2), match.group(3), match.group(4)
+            )
+        else:
+            # Letter-only codes: PSHH, LSH, TSH
+            match = self.INSTRUMENT_LETTERS_ONLY_PATTERN.match(text.upper())
+            if match:
+                letters, number, suffix, second = match.group(1), None, None, None
+            else:
+                # Single-letter instrument tags: A-101 (analysis).
+                match = self.SINGLE_LETTER_INSTRUMENT_PATTERN.match(text.upper())
+                if not match:
+                    return None
+                letters, number, suffix, second = (
+                    match.group(1), match.group(3), None, None
+                )
+
+        if not self._is_valid_instrument_prefix(letters):
+            return None
 
         # First letter = primary measured variable
         primary = INSTRUMENT_TAG_MAP.get(letters[0], "Unknown")
@@ -221,16 +294,24 @@ class TagParser:
         # Remaining letters = function(s)
         functions = []
         for char in letters[1:]:
-            func = INSTRUMENT_FUNCTION_MAP.get(char, char)
+            func = INSTRUMENT_FUNCTION_MAP.get(char)
+            if func is None:
+                return None
             functions.append(func)
 
         function_str = "/".join(functions) if functions else None
         description = f"{primary} {function_str}" if function_str else primary
 
+        tag_id = f"{letters}-{number}" if number else letters
+        if suffix:
+            tag_id += suffix
+        if second:
+            tag_id += f"/{second}"
+
         return ParsedTag(
             raw_text=text,
             tag_type=TagType.INSTRUMENT_TAG,
-            tag_id=f"{letters}-{number}{suffix or ''}",
+            tag_id=tag_id,
             primary_variable=primary,
             function=function_str,
             loop_number=number,
@@ -238,29 +319,62 @@ class TagParser:
             parsed_description=description,
         )
 
+    def _is_valid_instrument_prefix(self, letters: str) -> bool:
+        """
+        Return True if `letters` is a plausible ISA instrument prefix.
+
+        - 1 letter: a known measured variable that is NOT an equipment letter
+          (e.g. ``A`` for analysis). Equipment letters are handled earlier.
+        - 2+ letters: first letter a known measured variable, every remaining
+          letter a known ISA function code.
+        """
+        if not letters:
+            return False
+
+        if letters[0] not in INSTRUMENT_TAG_MAP:
+            return False
+
+        if len(letters) == 1:
+            # A single letter is ambiguous with equipment; only accept it when
+            # the letter is not an equipment letter.
+            return letters[0] not in self.EQUIPMENT_TYPE_MAP
+
+        for char in letters[1:]:
+            if char not in INSTRUMENT_FUNCTION_MAP:
+                return False
+        return True
+
     def _try_equipment_tag(self, text: str) -> Optional[ParsedTag]:
-        """Try to parse as an equipment tag (e.g., P-101, E-201 A/B)."""
+        """
+        Try to parse as an equipment tag (e.g., P-101A, E-201 A/B).
+
+        Only a single-letter prefix is accepted, and that letter must be a
+        known equipment letter. Longer prefixes are ISA instrument codes and
+        are handled by :meth:`_try_instrument_tag`.
+        """
         match = self.EQUIPMENT_PATTERN.match(text.upper())
         if not match:
             return None
 
-        prefix = match.group(1)
-        number = match.group(2)
-        suffix = match.group(3)
+        # group(1)=prefix letter, group(2)=separator, group(3)=number,
+        # group(4)=optional A/B suffix
+        prefix, number, suffix = match.group(1), match.group(3), match.group(4)
 
-        # Don't confuse with instrument tags (multi-letter prefixes)
-        if len(prefix) > 2:
+        if prefix not in self.EQUIPMENT_TYPE_MAP:
             return None
 
-        equip_type = self.EQUIPMENT_TYPE_MAP.get(prefix, f"Equipment ({prefix})")
+        equip_type = self.EQUIPMENT_TYPE_MAP[prefix]
+        tag_id = f"{prefix}-{number}"
+        if suffix:
+            tag_id += suffix.replace(" ", "")
 
         return ParsedTag(
             raw_text=text,
             tag_type=TagType.EQUIPMENT_TAG,
-            tag_id=f"{prefix}-{number}{' ' + suffix if suffix else ''}",
+            tag_id=tag_id,
             equipment_type=equip_type,
             loop_number=number,
-            suffix=suffix,
+            suffix=suffix.replace(" ", "") if suffix else None,
             parsed_description=equip_type,
         )
 
