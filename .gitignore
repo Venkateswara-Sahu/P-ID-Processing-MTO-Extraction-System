@@ -30,6 +30,9 @@ models/*.pt
 models/*.onnx
 models/*.weights
 !models/.gitkeep
+# The 229-class checkpoint is shipped: the app and three test modules
+# load it. Retrained checkpoints are not, unless deliberately added.
+!models/best.pt
 
 # ── Generated output ─────────────────────────────────────────
 data/output/*
@@ -37,7 +40,6 @@ data/output/*
 data/sample_pids/*.pdf
 
 # ── Temporary / debug files ──────────────────────────────────
-debug_ocr.py
 data/output/temp/
 *.log
 

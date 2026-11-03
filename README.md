@@ -107,9 +107,11 @@ copy .env.example .env   # Windows
 # GROQ_API_KEY=gsk_your_key_here   (optional — pipeline works without it)
 ```
 
-### 4. Add Your YOLOv8 Model
+### 4. YOLOv8 Model
 
-Place your trained weights at `models/best.pt`.
+The 229-class checkpoint ships in the repository at `models/best.pt`
+(22 MB), so a fresh clone runs without a download step. The app and the
+test suite load it directly.
 
 > **Training your own model:** Open `notebooks/01_yolo_training.ipynb` in Google Colab.  
 > Dataset: [Roboflow P&ID Object Detection](https://roboflow.com) — requires a free Roboflow account.
@@ -293,11 +295,12 @@ P-ID-Processing-MTO-Extraction-System/
 │   ├── merge_datasets.py        # Merge a target-style dataset in, remapping ids by name
 │   ├── evaluate_model.py        # Per-class evaluation; refuses class-list mismatches
 │   ├── annotate_target.py       # Semi-automatic annotator for target-style drawings
+│   ├── debug_ocr.py             # Print every OCR region found in one drawing
 │   └── build_notebook.py        # Regenerates the Colab notebook with tools embedded
-├── tests/                       # 263 pytest tests
+├── tests/                       # 271 pytest tests
 ├── notebooks/
 │   └── 01_yolo_training.ipynb   # Google Colab training notebook
-├── models/                      # Place trained YOLOv8 weights here (best.pt)
+├── models/                      # Shipped 229-class checkpoint (best.pt)
 ├── data/
 │   ├── sample_pids/             # Sample P&ID images for testing
 │   ├── target_style/            # Seed annotations for the target-style training set
