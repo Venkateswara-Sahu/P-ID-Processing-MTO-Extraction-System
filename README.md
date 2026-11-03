@@ -309,6 +309,7 @@ P-ID-Processing-MTO-Extraction-System/
 ├── MODEL_DATASET_AUDIT.md       # Dataset + model audit (measured)
 ├── pytest.ini
 ├── .env.example                 # Environment variable template
+├── LICENSE                      # MIT
 └── requirements.txt
 ```
 
@@ -419,7 +420,7 @@ Validation** (the deterministic R001–R006 findings) and **LLM Report**.
 
 ## 📝 License
 
-This project is built for educational and portfolio purposes. MIT License.
+Released under the [MIT License](LICENSE). Built for educational and portfolio purposes.
 
 ---
 
